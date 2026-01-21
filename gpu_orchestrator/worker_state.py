@@ -158,7 +158,12 @@ def derive_worker_state(
     ready_for_tasks = metadata.get('ready_for_tasks', False)
 
     # Heartbeat flags
-    has_heartbeat = last_heartbeat is not None
+    # Note: The workers table has DEFAULT NOW() for last_heartbeat, so newly created
+    # workers have a "fake" heartbeat at creation time. We only consider a heartbeat
+    # "real" if it's at least 5 seconds after the creation time.
+    heartbeat_since_creation = (last_heartbeat - created_at).total_seconds() if last_heartbeat else None
+    has_real_heartbeat = last_heartbeat is not None and heartbeat_since_creation is not None and heartbeat_since_creation > 5
+    has_heartbeat = has_real_heartbeat
     heartbeat_is_recent = has_heartbeat and heartbeat_age_sec < config.heartbeat_promotion_threshold_sec
 
     # Determine lifecycle state

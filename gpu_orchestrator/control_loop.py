@@ -377,13 +377,13 @@ class OrchestratorControlLoop:
                 summary.workers_failed += 1
                 continue
 
-            # PRIORITY 1: Check for promotion first (heartbeat detected)
+            # PRIORITY 1: Check for promotion first (worker signaled ready_for_tasks)
             # This must come before RunPod status checks to avoid the if/elif trap
             if ws.should_promote_to_active:
-                logger.info(f"Worker {worker_id} has recent heartbeat ({ws.heartbeat_age_sec:.0f}s old) - promoting to active")
+                logger.info(f"Worker {worker_id} signaled ready_for_tasks - promoting to active")
                 metadata_update = {
                     'promoted_to_active_at': datetime.now(timezone.utc).isoformat(),
-                    'promotion_reason': 'heartbeat_detected'
+                    'promotion_reason': 'ready_for_tasks'
                 }
                 await self.db.update_worker_status(worker_id, 'active', metadata_update)
                 summary.workers_promoted += 1
@@ -418,20 +418,10 @@ class OrchestratorControlLoop:
                             summary.startup_scripts_launched += 1
                         else:
                             logger.warning(f"Failed to launch startup script for {worker_id}")
-
-            # Fallback: check log-based detection
-            else:
-                startup_status = self.runpod.check_worker_startup_status(worker_id, runpod_id)
-                if startup_status['status'] == 'active':
-                    logger.info(f"Worker {worker_id} detected as active via logging - promoting now")
-                    metadata_update = {
-                        'promoted_to_active_at': datetime.now(timezone.utc).isoformat(),
-                        'promotion_reason': 'logging_detected'
-                    }
-                    await self.db.update_worker_status(worker_id, 'active', metadata_update)
-                    summary.workers_promoted += 1
-                elif startup_status['status'] == 'initializing':
-                    logger.debug(f"Worker {worker_id}: {startup_status['message']}")
+            
+            # Note: Promotion now happens via ready_for_tasks flag in heartbeat,
+            # not via log-based detection. Worker stays in 'spawning' until it
+            # explicitly signals ready_for_tasks=true.
 
     # =========================================================================
     # PHASE 5: Health check active workers
@@ -530,9 +520,12 @@ class OrchestratorControlLoop:
 
                 # Log healthy worker state
                 if ws.lifecycle == WorkerLifecycle.ACTIVE_READY:
-                    logger.debug(f"Worker {worker_id}: healthy (VRAM: {ws.vram_total_mb}MB)")
+                    logger.debug(f"Worker {worker_id}: healthy (VRAM: {ws.vram_total_mb}MB, ready_for_tasks=True)")
                 elif ws.lifecycle == WorkerLifecycle.ACTIVE_INITIALIZING:
-                    logger.info(f"Worker {worker_id}: initializing ({ws.effective_age_sec:.0f}s)")
+                    # Worker is heartbeating but not yet ready_for_tasks
+                    vram_status = f"VRAM: {ws.vram_total_mb}MB" if ws.vram_reported else "no VRAM"
+                    ready_status = "ready_for_tasks=True" if ws.ready_for_tasks else "waiting for ready_for_tasks"
+                    logger.info(f"Worker {worker_id}: initializing ({ws.effective_age_sec:.0f}s, {vram_status}, {ready_status})")
                 elif ws.lifecycle == WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED:
                     logger.info(f"Worker {worker_id}: GPU not detected yet ({ws.effective_age_sec:.0f}s / {self.config.gpu_not_detected_timeout_sec}s)")
 

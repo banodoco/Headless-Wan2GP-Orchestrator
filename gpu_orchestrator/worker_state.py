@@ -62,6 +62,7 @@ class DerivedWorkerState:
     vram_total_mb: Optional[int]
     vram_used_mb: Optional[int]
     vram_reported: bool               # Has VRAM data been reported?
+    ready_for_tasks: bool             # Worker explicitly signaled readiness
     has_ever_claimed_task: bool
     has_active_task: bool
 
@@ -153,6 +154,9 @@ def derive_worker_state(
     vram_timestamp = metadata.get('vram_timestamp')
     vram_reported = vram_timestamp is not None
 
+    # Ready for tasks flag - explicit signal from worker that it can claim tasks
+    ready_for_tasks = metadata.get('ready_for_tasks', False)
+
     # Heartbeat flags
     has_heartbeat = last_heartbeat is not None
     heartbeat_is_recent = has_heartbeat and heartbeat_age_sec < config.heartbeat_promotion_threshold_sec
@@ -164,6 +168,7 @@ def derive_worker_state(
         heartbeat_age_sec=heartbeat_age_sec,
         vram_total=vram_total,
         vram_reported=vram_reported,
+        ready_for_tasks=ready_for_tasks,
         script_launched=metadata.get('startup_script_launched', False),
         config=config
     )
@@ -219,12 +224,13 @@ def derive_worker_state(
             error_code = "SPAWNING_TIMEOUT"
 
     # Should promote?
+    # Only promote when worker explicitly signals it's ready for tasks.
+    # Heartbeat alone just means "alive", not "ready to work".
     should_promote = (
         db_status == 'spawning' and
         heartbeat_is_recent and
-        lifecycle in (WorkerLifecycle.ACTIVE_INITIALIZING,
-                      WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED,
-                      WorkerLifecycle.ACTIVE_READY)
+        ready_for_tasks and  # Explicit signal from worker
+        lifecycle == WorkerLifecycle.ACTIVE_READY
     )
 
     return DerivedWorkerState(
@@ -241,6 +247,7 @@ def derive_worker_state(
         vram_total_mb=vram_total,
         vram_used_mb=vram_used,
         vram_reported=vram_reported,
+        ready_for_tasks=ready_for_tasks,
         has_ever_claimed_task=has_ever_claimed,
         has_active_task=has_active_task,
         is_gpu_broken=is_gpu_broken,
@@ -259,6 +266,7 @@ def _determine_lifecycle(
     heartbeat_age_sec: Optional[float],
     vram_total: Optional[int],
     vram_reported: bool,
+    ready_for_tasks: bool,
     script_launched: bool,
     config: 'OrchestratorConfig'
 ) -> WorkerLifecycle:
@@ -277,13 +285,16 @@ def _determine_lifecycle(
         if heartbeat_age_sec is not None and heartbeat_age_sec > config.gpu_idle_timeout_sec:
             return WorkerLifecycle.ACTIVE_STALE
 
-        # Not stale => active. VRAM determines sub-state.
-        if vram_reported:
-            if vram_total == 0:
-                return WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED
-            else:
-                return WorkerLifecycle.ACTIVE_READY
-        return WorkerLifecycle.ACTIVE_INITIALIZING
+        # Not stale => active. Determine sub-state based on readiness signals.
+        # ACTIVE_READY requires both: VRAM detected AND explicit ready_for_tasks signal.
+        # This decouples "GPU is working" from "worker is ready to claim tasks".
+        if ready_for_tasks and vram_reported and vram_total and vram_total > 0:
+            return WorkerLifecycle.ACTIVE_READY
+        elif vram_reported and vram_total == 0:
+            return WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED
+        else:
+            # Either no VRAM yet, or VRAM but not ready_for_tasks
+            return WorkerLifecycle.ACTIVE_INITIALIZING
 
     # No heartbeat - still spawning
     if db_status in ('spawning', 'inactive', 'active'):

@@ -1220,6 +1220,9 @@ class OrchestratorControlLoop:
                     return False
 
                 logger.info(f"WORKER_LIFECYCLE [Worker {worker_id}] RunPod terminated successfully")
+            else:
+                # BUG FIX: Don't silently skip - this leaves orphaned pods!
+                logger.error(f"WORKER_LIFECYCLE [Worker {worker_id}] NO RUNPOD_ID - cannot terminate pod!")
 
             termination_metadata = {'terminated_at': datetime.now(timezone.utc).isoformat()}
             await self.db.update_worker_status(worker_id, 'terminated', termination_metadata)

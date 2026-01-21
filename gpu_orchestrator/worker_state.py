@@ -229,13 +229,13 @@ def derive_worker_state(
             error_code = "SPAWNING_TIMEOUT"
 
     # Should promote?
-    # Only promote when worker explicitly signals it's ready for tasks.
-    # Heartbeat alone just means "alive", not "ready to work".
+    # TODO: Add ready_for_tasks check once worker sends it
     should_promote = (
         db_status == 'spawning' and
         heartbeat_is_recent and
-        ready_for_tasks and  # Explicit signal from worker
-        lifecycle == WorkerLifecycle.ACTIVE_READY
+        lifecycle in (WorkerLifecycle.ACTIVE_INITIALIZING,
+                      WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED,
+                      WorkerLifecycle.ACTIVE_READY)
     )
 
     return DerivedWorkerState(
@@ -290,16 +290,14 @@ def _determine_lifecycle(
         if heartbeat_age_sec is not None and heartbeat_age_sec > config.gpu_idle_timeout_sec:
             return WorkerLifecycle.ACTIVE_STALE
 
-        # Not stale => active. Determine sub-state based on readiness signals.
-        # ACTIVE_READY requires both: VRAM detected AND explicit ready_for_tasks signal.
-        # This decouples "GPU is working" from "worker is ready to claim tasks".
-        if ready_for_tasks and vram_reported and vram_total and vram_total > 0:
-            return WorkerLifecycle.ACTIVE_READY
-        elif vram_reported and vram_total == 0:
-            return WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED
-        else:
-            # Either no VRAM yet, or VRAM but not ready_for_tasks
-            return WorkerLifecycle.ACTIVE_INITIALIZING
+        # Not stale => active. VRAM determines sub-state.
+        # TODO: Once worker sends ready_for_tasks=true, add that check here
+        if vram_reported:
+            if vram_total == 0:
+                return WorkerLifecycle.ACTIVE_GPU_NOT_DETECTED
+            else:
+                return WorkerLifecycle.ACTIVE_READY
+        return WorkerLifecycle.ACTIVE_INITIALIZING
 
     # No heartbeat - still spawning
     if db_status in ('spawning', 'inactive', 'active'):
